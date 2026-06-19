@@ -66,7 +66,7 @@ jobs:
           def is_valid_vless(link):
               try:
                   payload = link.replace("vless://", "").split('@')[0]
-                  if len(payload) < 5 or "%" in payload:
+                  if len(payload) < 5:
                       return False
                   return True
               except:
@@ -75,8 +75,8 @@ jobs:
           def is_clean_link(link):
               if not link or len(link) < 15:
                   return False
-              # Ищем битые символы кодировки () и зацикленный URL-encode (%2525)
-              if "\ufffd" in link or "" in link or "%2525" in link:
+              # Вот правильная строка: ищем ТОЛЬКО битые символы (\ufffd) и зацикленный URL-encode (%2525)
+              if "\ufffd" in link or "%2525" in link:
                   return False
               return True
 
@@ -122,8 +122,10 @@ jobs:
 
           with open("clean_proxies.txt", "w", encoding="utf-8") as f:
               for config in selected_configs:
-                  if config.strip():
-                      f.write(config + "\n")
+                  clean_config = config.strip()
+                  # Записываем только непустые строки
+                  if clean_config:
+                      f.write(clean_config + "\n")
           EOF
 
       # Шаг 2: Установка чекера
