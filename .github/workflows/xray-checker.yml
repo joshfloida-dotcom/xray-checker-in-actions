@@ -17,7 +17,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Шаг 1: Агрегация и жесткая фильтрация битых ссылок
+      # Шаг 1: Агрегация, декодирование и фильтрация битых ссылок
       - name: Aggregate and Validate
         run: |
           python3 - << 'EOF'
@@ -40,8 +40,17 @@ jobs:
               "https://raw.githubusercontent.com/capitainblack/freetm3/refs/heads/main/configs/sub_10.txt"
           ]
 
-          # Регулярное выражение для проверки структуры стандартного UUID
-          UUID_REGEX = re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
+          def decode_subscription(content):
+              """Пытается декодировать Base64, если в тексте нет явных протоколов."""
+              content = content.strip()
+              if "://" not in content:
+                  try:
+                      missing_padding = len(content) % 4
+                      if missing_padding: content += '=' * (4 - missing_padding)
+                      return base64.b64decode(content).decode('utf-8', errors='ignore')
+                  except:
+                      return content
+              return content
 
           def is_valid_vmess(link):
               try:
@@ -57,28 +66,41 @@ jobs:
 
           def is_valid_vless(link):
               try:
-                  # Извлекаем UUID (всё, что между vless:// и знаком @)
+                  # Извлекаем ID
                   payload = link.replace("vless://", "").split('@')[0]
-                  return bool(UUID_REGEX.match(payload))
+                  # Блокируем пустые ID и крашащий Xray спам из процентов (%2525)
+                  if len(payload) < 5 or "%" in payload:
+                      return False
+                  return True
               except:
                   return False
 
           def is_clean_link(link):
-              # Отсекаем ссылки с битыми байтами () и зацикленным URL-кодированием (%2525)
+              # Отсекаем явный мусор, битые символы и пустые строки
+              if not link or len(link) < 15:
+                  return False
               if "" in link or "%2525" in link:
                   return False
               return True
 
           unique_configs = set()
-          print("[*] Скачивание и жесткая фильтрация конфигов...")
+          total_found = 0
+
+          print("[*] Скачивание и фильтрация конфигов...")
 
           for url in SOURCES:
               try:
                   req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
                   with urllib.request.urlopen(req, timeout=15) as response:
-                      content = response.read().decode('utf-8', errors='ignore')
-                      matches = re.findall(r'(?:vmess|vless|ss|trojan)://[^\s]+', content)
+                      raw_content = response.read().decode('utf-8', errors='ignore')
+                      content = decode_subscription(raw_content)
+                      
+                      # Ищем ссылки без пробелов и кавычек
+                      matches = re.findall(r'(?:vmess|vless|ss|trojan)://[^\s"' + "'" + r'<>]+', content)
+                      total_found += len(matches)
+
                       for match in matches:
+                          match = match.strip()
                           if not is_clean_link(match):
                               continue
                           
@@ -89,7 +111,6 @@ jobs:
                               if is_valid_vless(match):
                                   unique_configs.add(match)
                           else:
-                              # ss:// и trojan:// добавляем, если они прошли базовую очистку символов
                               unique_configs.add(match)
               except Exception as e:
                   print(f"[!] Ошибка загрузки {url}: {e}")
@@ -100,10 +121,13 @@ jobs:
           CHECK_LIMIT = 2000
           selected_configs = unique_list[:CHECK_LIMIT]
           
+          print(f"[*] Всего ссылок найдено до фильтрации: {total_found}")
+          print(f"[+] Успешно очищено и отобрано: {len(selected_configs)}")
+
           with open("clean_proxies.txt", "w", encoding="utf-8") as f:
               for config in selected_configs:
-                  f.write(config + "\n")
-          print(f"[+] Успешно очищено и отобрано {len(selected_configs)} конфигураций.")
+                  if config.strip():
+                      f.write(config + "\n")
           EOF
 
       # Шаг 2: Установка чекера
@@ -112,7 +136,7 @@ jobs:
           curl -sL -o - $(curl -s https://api.github.com/repos/kutovoys/xray-checker/releases/latest | grep "browser_download_url.*linux-amd64.tar.gz" | cut -d'"' -f4) | tar -xz
           chmod +x xray-checker
 
-      # Шаг 3: Запуск проверки и вывод логов в файл (используем tee)
+      # Шаг 3: Запуск проверки и вывод логов в файл
       - name: Execute Check
         env:
           SUBSCRIPTION_URL: "file://${{ github.workspace }}/clean_proxies.txt"
@@ -129,7 +153,7 @@ jobs:
               --run-once | tee xray_check_log.txt || echo "Проверка завершена"
           fi
 
-      # Шаг 4: Сохраняем текстовые файлы как артефакты, чтобы их можно было скачать
+      # Шаг 4: Сохранение артефактов
       - name: Upload Scanned Configs Artifact
         uses: actions/upload-artifact@v4
         with:
