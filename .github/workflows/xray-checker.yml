@@ -1,14 +1,14 @@
 name: Run xray-checker (Safe & Optimized)
 
 on:
-  workflow_dispatch: # Ручной запуск из интерфейса GitHub
+  workflow_dispatch:
     inputs:
       args:
         description: "Аргументы для ручного запуска (оставь пустым для дефолтного чека)"
         required: false
         default: ""
   schedule:
-    - cron: "0 */2 * * *" # Автоматический запуск каждые 2 часа (для 2000 прокси это абсолютно безопасно)
+    - cron: "0 */2 * * *"
 
 jobs:
   run-xray-checker:
@@ -17,16 +17,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Шаг 1: Агрегация, удаление дубликатов из 93к и случайный выбор 2000 конфигов
-      - name: Aggregate, Deduplicate and Sample
+      # Шаг 1: Умный сбор (Base64), очистка от мусора и случайная выборка 2000 конфигов
+      - name: Advanced Aggregate, Clean and Sample
         run: |
           python3 - << 'EOF'
           import urllib.request
           import re
           import random
+          import base64
 
-          # === ТВОИ ССЫЛКИ-ИСТОЧНИКИ СЮДА ===
-          # Вставь сюда свои raw-ссылки на гизты, подписки или файлы
           SOURCES = [
               "https://raw.githubusercontent.com/capitainblack/freetm3/refs/heads/main/configs/sub_1.txt",
               "https://raw.githubusercontent.com/capitainblack/freetm3/refs/heads/main/configs/sub_2.txt",
@@ -40,26 +39,56 @@ jobs:
               "https://raw.githubusercontent.com/capitainblack/freetm3/refs/heads/main/configs/sub_10.txt"
           ]
 
-          unique_configs = set()
-          proxy_pattern = re.compile(r'(vless|vmess|ss|trojan|ssconf)://[^\s]+')
+          SUPPORTED_PROTOCOLS = ("vmess://", "vless://", "trojan://", "ss://", "ssr://", "hy2://", "hysteria2://", "tuic://")
+          proxy_pattern = re.compile(r'(?:vless|vmess|ss|ssr|trojan|hy2|hysteria2|tuic)://[^\s]+')
+          uuid_pattern = re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
 
-          print("[*] Скачивание и парсинг баз...")
+          unique_configs = set()
+
+          def decode_and_extract(raw_text):
+              content = raw_text.strip()
+              if not content:
+                  return []
+              if any(p in content for p in SUPPORTED_PROTOCOLS):
+                  return [m.strip() for m in proxy_pattern.findall(content)]
+              try:
+                  padding = len(content) % 4
+                  if padding:
+                      content += "=" * (4 - padding)
+                  decoded = base64.b64decode(content).decode("utf-8", errors="ignore")
+                  return [m.strip() for m in proxy_pattern.findall(decoded)]
+              except:
+                  return []
+
+          def is_valid_config(config):
+              if len(config) > 800 or len(config) < 15:
+                  return False
+              if config.startswith('vless://'):
+                  try:
+                      uuid_part = config.split('://')[1].split('@')[0]
+                      if not uuid_pattern.match(uuid_part):
+                          return False
+                  except:
+                      return False
+              return True
+
+          print("[*] Запуск глубокого парсинга подписок...")
           for url in SOURCES:
               try:
                   req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
                   with urllib.request.urlopen(req, timeout=15) as response:
-                      content = response.read().decode('utf-8', errors='ignore')
-                      matches = [m.group(0) if hasattr(m, 'group') else re.search(m+r'://[^\s]+', content).group(0) for m in proxy_pattern.finditer(content)]
-                      for match in matches:
-                          unique_configs.add(match.strip())
+                      raw_data = response.read().decode('utf-8', errors='ignore')
+                      extracted = decode_and_extract(raw_data)
+                      for config in extracted:
+                          if is_valid_config(config):
+                              unique_configs.add(config)
               except Exception as e:
-                  print(f"[!] Ошибка при загрузке источника {url}: {e}")
+                  print(f"[!] Не удалось обработать источник {url}: {e}")
 
           unique_list = list(unique_configs)
           total_found = len(unique_list)
-          print(f"[+] Всего уникальных конфигураций найдено в источниках: {total_found}")
+          print(f"[+] Успешно отфильтровано и очищено уникальных конфигов: {total_found}")
 
-          # Ограничиваем выборку до 2000 штук для защиты раннера от блокировок
           CHECK_LIMIT = 2000
           if total_found > CHECK_LIMIT:
               selected_configs = random.sample(unique_list, CHECK_LIMIT)
@@ -68,7 +97,6 @@ jobs:
               selected_configs = unique_list
               print(f"[*] База небольшая ({total_found}), проверяем полностью")
 
-          # Сохраняем готовую выборку в локальный файл
           with open("clean_proxies.txt", "w", encoding="utf-8") as f:
               for config in selected_configs:
                   f.write(config + "\n")
@@ -87,11 +115,9 @@ jobs:
           METRICS_PUSH_URL: ${{ secrets.PUSH_URL }}
           INSTANCE: ${{ secrets.INSTANCE || 'github-actions-sampled' }}
         run: |
-          # Если запуск ручной и переданы кастомные аргументы через inputs
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.args }}" ]; then
             ./xray-checker ${{ github.event.inputs.args }}
           else
-            # Стандартный прогон: убраны неподдерживаемые флаги
             ./xray-checker \
               --subscription-url="$SUBSCRIPTION_URL" \
               --metrics-push-url="$METRICS_PUSH_URL" \
