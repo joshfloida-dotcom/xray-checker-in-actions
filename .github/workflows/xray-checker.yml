@@ -1,42 +1,3 @@
-name: Aggregate and Validate Proxies
-
-on:
-  schedule:
-    - cron: '0 */6 * * *'  # Каждые 6 часов
-  workflow_dispatch:
-    inputs:
-      check_online:
-        description: 'TCP-проверка доступности серверов'
-        required: false
-        default: 'false'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
-      limit:
-        description: 'Лимит конфигов'
-        required: false
-        default: '2000'
-      workers:
-        description: 'Потоков для TCP-проверки'
-        required: false
-        default: '20'
-
-jobs:
-  aggregate:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
       - name: Aggregate and Validate
         run: |
           python3 - << 'EOF'
@@ -45,12 +6,6 @@ jobs:
           import random
           import base64
           import json
-          import time
-          import socket
-          import os
-          import sys
-          from concurrent.futures import ThreadPoolExecutor, as_completed
-          from collections import defaultdict
 
           SOURCES = [
               "https://raw.githubusercontent.com/capitainblack/freetm3/refs/heads/main/configs/sub_1.txt",
@@ -62,25 +17,17 @@ jobs:
               "https://raw.githubusercontent.com/capitainblack/freetm3/refs/heads/main/configs/sub_7.txt",
               "https://raw.githubusercontent.com/capitainblack/freetm3/refs/heads/main/configs/sub_8.txt",
               "https://raw.githubusercontent.com/capitainblack/freetm3/refs/heads/main/configs/sub_9.txt",
-              "https://raw.githubusercontent.com/capitainblack/freetm3/refs/heads/main/configs/sub_10.txt",
+              "https://raw.githubusercontent.com/capitainblack/freetm3/refs/heads/main/configs/sub_10.txt"
           ]
 
           UUID_RE = re.compile(
               r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
           )
-
-          HOSTNAME_RE = re.compile(
-              r'^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$'
+          HOST_RE = re.compile(
+              r'^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$|'
+              r'^(\d{1,3}\.){3}\d{1,3}$'
           )
-
-          LINK_RE = re.compile(r'(?:vmess|vless|ss|trojan)://[^\s\'"<>()\[\],;]+')
-
-          CHECK_LIMIT = int(os.environ.get('INPUT_LIMIT', '2000'))
-          MAX_RETRIES = 2
-          RETRY_DELAY = 2
-          CONNECT_TIMEOUT = 5
-          CHECK_ONLINE = os.environ.get('INPUT_CHECK_ONLINE', 'false').lower() == 'true'
-          WORKERS = int(os.environ.get('INPUT_WORKERS', '20'))
+          IPV6_RE = re.compile(r'^[0-9a-fA-F:]+$')
 
           def decode_subscription(content):
               content = content.strip()
@@ -94,77 +41,59 @@ jobs:
                       return content
               return content
 
-          def is_valid_ip(host):
-              parts = host.split(".")
-              if len(parts) != 4:
-                  return False
-              return all(p.isdigit() and 0 <= int(p) <= 255 for p in parts)
-
-          def is_valid_host(host):
-              if not host:
-                  return False
-              if host.startswith("[") and host.endswith("]"):
-                  return len(host) > 2
-              return bool(HOSTNAME_RE.match(host)) or is_valid_ip(host)
-
-          def is_valid_port(port_str):
-              return port_str.isdigit() and 1 <= int(port_str) <= 65535
-
-          def parse_host_port(server):
-              server = server.split("?")[0].split("/")[0]
-              if server.startswith("["):
-                  bracket_end = server.find("]")
-                  if bracket_end == -1 or bracket_end + 1 >= len(server):
-                      return None, None
-                  host = server[:bracket_end + 1]
-                  port_str = server[bracket_end + 2:]
-                  return host, port_str
-              if ":" not in server:
-                  return None, None
-              host, port_str = server.split(":", 1)
-              return host, port_str
-
-          def extract_host_port_from_link(link):
-              try:
-                  if link.startswith("vmess://"):
-                      payload = link[len("vmess://"):].split('#')[0]
-                      if not payload.startswith('{'):
-                          missing_padding = len(payload) % 4
-                          if missing_padding:
-                              payload += '=' * (4 - missing_padding)
-                          payload = base64.b64decode(payload).decode('utf-8', errors='ignore')
-                      data = json.loads(payload)
-                      return data.get("add"), str(data.get("port", ""))
-                  else:
-                      scheme_end = link.find("://")
-                      body = link[scheme_end + 3:].split('#')[0]
-                      if "@" not in body:
-                          return None, None
-                      _, server = body.split("@", 1)
-                      return parse_host_port(server.strip())
-              except Exception:
-                  return None, None
-
           def has_garbage(link):
+              """Проверяем наличие битых UTF-8 маркеров и двойного URL-encoding."""
               if not link or len(link) < 15:
                   return True
               if "\ufffd" in link:
                   return True
               if "%2525" in link or "%25%25" in link:
                   return True
+              # Считаем количество непечатаемых control characters (кроме \n \r \t)
               control_chars = sum(1 for ch in link if ord(ch) < 32 and ch not in '\n\r\t')
               if control_chars > 3:
                   return True
               return False
 
+          def parse_host_port(server_str):
+              """Универсальный парсер host:port с поддержкой IPv6"""
+              # Отделяем query-параметры и фрагменты
+              parts = re.split(r'[?#]', server_str, maxsplit=1)
+              host_port_str = parts[0]
+              
+              if host_port_str.startswith('['):
+                  try:
+                      end_bracket = host_port_str.index(']')
+                      host = host_port_str[1:end_bracket]
+                      rest = host_port_str[end_bracket+1:]
+                      if not rest.startswith(':'):
+                          return None, None
+                      port_str = rest[1:]
+                      if not IPV6_RE.match(host):
+                          return None, None
+                  except ValueError:
+                      return None, None
+              else:
+                  if ":" not in host_port_str:
+                      return None, None
+                  host, port_str = host_port_str.split(":", 1)
+                  if not HOST_RE.match(host):
+                      return None, None
+                      
+              if not port_str.isdigit() or not (1 <= int(port_str) <= 65535):
+                  return None, None
+                  
+              return host, port_str
+
           def is_valid_vmess(link):
               try:
-                  payload = link[len("vmess://"):].split('#')[0]
+                  payload = link.replace("vmess://", "").split('#')[0]
                   if not payload.startswith('{'):
                       missing_padding = len(payload) % 4
                       if missing_padding:
                           payload += '=' * (4 - missing_padding)
-                      payload = base64.b64decode(payload).decode('utf-8', errors='ignore')
+                      # validate=True защищает от невидимого мусора в base64
+                      payload = base64.b64decode(payload, validate=True).decode('utf-8', errors='ignore')
                   data = json.loads(payload)
                   if not data.get("add") or not data.get("id"):
                       return False
@@ -174,247 +103,139 @@ jobs:
 
           def is_valid_vless(link):
               try:
-                  body = link[len("vless://"):].split('#')[0]
+                  body = link.replace("vless://", "").split('#')[0]
                   if "@" not in body:
                       return False
+                  
                   creds, server = body.split("@", 1)
-                  if not UUID_RE.match(creds.strip()):
+                  creds = creds.strip()
+                  server = server.strip()
+                  
+                  if not UUID_RE.match(creds):
                       return False
-                  host, port_str = parse_host_port(server.strip())
-                  if not host or not port_str:
+                  
+                  host, port = parse_host_port(server)
+                  if host is None:
                       return False
-                  return is_valid_host(host) and is_valid_port(port_str)
+                  
+                  return True
               except Exception:
                   return False
 
           def is_valid_trojan(link):
               try:
-                  body = link[len("trojan://"):].split('#')[0]
+                  body = link.replace("trojan://", "").split('#')[0]
                   if "@" not in body:
                       return False
+                  
                   password, server = body.split("@", 1)
                   password = password.strip()
-                  if not password or "\ufffd" in password:
+                  server = server.strip()
+                  
+                  if not password or len(password) < 1:
                       return False
-                  host, port_str = parse_host_port(server.strip())
-                  if not host or not port_str:
+                  if "\ufffd" in password:
                       return False
-                  return is_valid_host(host) and is_valid_port(port_str)
+                  
+                  host, port = parse_host_port(server)
+                  if host is None:
+                      return False
+                  
+                  return True
               except Exception:
                   return False
 
           def is_valid_ss(link):
               try:
-                  body = link[len("ss://"):].split('#')[0]
+                  body = link.replace("ss://", "").split('#')[0]
                   if "@" not in body:
                       return False
+                  
                   userinfo, server = body.split("@", 1)
                   server = server.strip()
-
-                  try:
-                      missing_padding = len(userinfo) % 4
-                      if missing_padding:
-                          userinfo += '=' * (4 - missing_padding)
-                      decoded = base64.b64decode(userinfo).decode('utf-8', errors='ignore')
-                      if ':' in decoded:
-                          userinfo = decoded
-                  except Exception:
-                      pass
-
-                  if ':' in userinfo:
-                      method, password = userinfo.split(':', 1)
-                      if not re.match(r'^[a-zA-Z0-9_\-]+$', method):
-                          return False
-                      if not password or "\ufffd" in password:
-                          return False
-                  else:
-                      if not userinfo or "\ufffd" in userinfo:
-                          return False
-
-                  host, port_str = parse_host_port(server)
-                  if not host or not port_str:
-                      return False
-                  return is_valid_host(host) and is_valid_port(port_str)
-              except Exception:
-                  return False
-
-          VALIDATORS = {
-              "vmess://":  is_valid_vmess,
-              "vless://":  is_valid_vless,
-              "ss://":     is_valid_ss,
-              "trojan://": is_valid_trojan,
-          }
-
-          def fetch_with_retry(url):
-              last_error = None
-              for attempt in range(MAX_RETRIES + 1):
-                  try:
-                      req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                      with urllib.request.urlopen(req, timeout=15) as response:
-                          return response.read().decode('utf-8', errors='ignore')
-                  except Exception as e:
-                      last_error = e
-                      if attempt < MAX_RETRIES:
-                          print(f"[!] Попытка {attempt + 1} не удалась для {url}, повтор через {RETRY_DELAY}с...")
-                          time.sleep(RETRY_DELAY)
-              raise last_error
-
-          def tcp_check(host, port, timeout=CONNECT_TIMEOUT):
-              if host.startswith("[") and host.endswith("]"):
-                  host = host[1:-1]
-              try:
-                  with socket.create_connection((host, int(port)), timeout=timeout):
-                      return True
-              except Exception:
-                  return False
-
-          def process_source(url):
-              found = []
-              try:
-                  raw_content = fetch_with_retry(url)
-                  content = decode_subscription(raw_content)
-                  matches = LINK_RE.findall(content)
-
-                  for match in matches:
-                      match = match.strip()
-                      if has_garbage(match):
-                          continue
-                      for prefix, validator in VALIDATORS.items():
-                          if match.startswith(prefix):
-                              if validator(match):
-                                  found.append(match)
-                              break
-              except Exception as e:
-                  print(f"[!] Ошибка загрузки {url}: {e}")
-              return found
-
-          # === MAIN ===
-          print("[*] Параллельное скачивание и фильтрация конфигов...")
-
-          all_links = []
-          with ThreadPoolExecutor(max_workers=5) as executor:
-              futures = {executor.submit(process_source, url): url for url in SOURCES}
-              for future in as_completed(futures):
-                  all_links.extend(future.result())
-
-          total_found = len(all_links)
-
-          # Дедупликация по host:port
-          seen = set()
-          unique_configs = []
-          for link in all_links:
-              host, port = extract_host_port_from_link(link)
-              if host and port:
-                  key = f"{host}:{port}"
-                  if key not in seen:
-                      seen.add(key)
-                      unique_configs.append(link)
-
-          random.shuffle(unique_configs)
-          candidates = unique_configs[:CHECK_LIMIT]
-
-          # TCP-проверка
-          online_configs = []
-          if CHECK_ONLINE and candidates:
-              print(f"[*] TCP-проверка {len(candidates)} серверов (workers={WORKERS})...")
-              with ThreadPoolExecutor(max_workers=WORKERS) as executor:
-                  future_to_link = {
-                      executor.submit(tcp_check, *extract_host_port_from_link(link)): link
-                      for link in candidates
-                  }
-                  for future in as_completed(future_to_link):
-                      link = future_to_link[future]
+                  
+                  # Пытаемся декодировать base64, только если строка на него похожа
+                  if re.match(r'^[A-Za-z0-9+/]+=*$', userinfo):
                       try:
-                          if future.result():
-                              online_configs.append(link)
+                          missing_padding = len(userinfo) % 4
+                          if missing_padding:
+                              userinfo += '=' * (4 - missing_padding)
+                          decoded = base64.b64decode(userinfo, validate=True).decode('utf-8', errors='ignore')
+                          if ':' in decoded:
+                              userinfo = decoded
                       except Exception:
                           pass
-              print(f"[+] Онлайн: {len(online_configs)} / {len(candidates)}")
-              selected = online_configs
-          else:
-              selected = candidates
+                  
+                  if ':' not in userinfo:
+                      return False
+                  
+                  method = userinfo.split(':', 1)[0]
+                  password = userinfo.split(':', 1)[1]
+                  
+                  if not re.match(r'^[a-zA-Z0-9_\-]+$', method):
+                      return False
+                  if not password or "\ufffd" in password:
+                      return False
+                  
+                  host, port = parse_host_port(server)
+                  if host is None:
+                      return False
+                  
+                  return True
+              except Exception:
+                  return False
 
-          # Статистика
-          stats = defaultdict(int)
-          for link in selected:
-              for prefix in VALIDATORS:
-                  if link.startswith(prefix):
-                      stats[prefix.replace("://", "")] += 1
-                      break
+          unique_configs = set()
+          total_found = 0
 
+          print("[*] Скачивание и фильтрация конфигов...")
+
+          for url in SOURCES:
+              try:
+                  req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                  with urllib.request.urlopen(req, timeout=15) as response:
+                      raw_content = response.read().decode('utf-8', errors='ignore')
+                      content = decode_subscription(raw_content)
+                      
+                      # Улучшенная регулярка: отсекает висящие знаки препинания на конце
+                      matches = re.findall(
+                          r'(?:vmess|vless|ss|trojan)://[^\s\'"<>]+(?<![.,)\]}>])',
+                          content
+                      )
+                      total_found += len(matches)
+
+                      for match in matches:
+                          match = match.strip()
+                          if has_garbage(match):
+                              continue
+                          
+                          if match.startswith("vmess://"):
+                              if is_valid_vmess(match):
+                                  unique_configs.add(match)
+                          elif match.startswith("vless://"):
+                              if is_valid_vless(match):
+                                  unique_configs.add(match)
+                          elif match.startswith("ss://"):
+                              if is_valid_ss(match):
+                                  unique_configs.add(match)
+                          elif match.startswith("trojan://"):
+                              if is_valid_trojan(match):
+                                  unique_configs.add(match)
+              except Exception as e:
+                  print(f"[!] Ошибка загрузки {url}: {e}")
+
+          unique_list = list(unique_configs)
+          random.shuffle(unique_list)
+          
+          CHECK_LIMIT = 2000
+          selected_configs = unique_list[:CHECK_LIMIT]
+          
           print(f"[*] Всего ссылок найдено до фильтрации: {total_found}")
-          print(f"[+] Уникальных после дедупликации: {len(unique_configs)}")
-          print(f"[+] Итого отобрано: {len(selected)}")
-          for proto, count in sorted(stats.items()):
-              print(f"    {proto}: {count}")
+          print(f"[+] Успешно очищено и отобрано: {len(selected_configs)}")
 
-          # Запись файлов
           with open("clean_proxies.txt", "w", encoding="utf-8") as f:
-              for config in selected:
-                  f.write(config.strip() + "\n")
-          print("[+] Сохранено clean_proxies.txt")
-
-          if selected:
-              subscription = base64.b64encode("\n".join(selected).encode('utf-8')).decode('utf-8')
-              with open("subscription.txt", "w", encoding="utf-8") as f:
-                  f.write(subscription)
-              print("[+] Сохранено subscription.txt (base64)")
-
-          meta = {
-              "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-              "total_found": total_found,
-              "unique": len(unique_configs),
-              "selected": len(selected),
-              "online_checked": CHECK_ONLINE,
-              "by_protocol": dict(stats),
-              "sources": len(SOURCES),
-          }
-          with open("meta.json", "w", encoding="utf-8") as f:
-              json.dump(meta, f, indent=2)
-          print("[+] Сохранено meta.json")
-
-          # GitHub Actions output
-          with open(os.environ.get('GITHUB_OUTPUT', '/dev/null'), 'a') as f:
-              f.write(f"count={len(selected)}\n")
-              f.write(f"unique={len(unique_configs)}\n")
-          EOF
-        env:
-          INPUT_CHECK_ONLINE: ${{ github.event.inputs.check_online || 'false' }}
-          INPUT_LIMIT: ${{ github.event.inputs.limit || '2000' }}
-          INPUT_WORKERS: ${{ github.event.inputs.workers || '20' }}
-
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: proxy-configs
-          path: |
-            clean_proxies.txt
-            subscription.txt
-            meta.json
-          retention-days: 30
-
-      - name: Commit to Repository
-        if: github.ref == 'refs/heads/main'
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add clean_proxies.txt subscription.txt meta.json
-          git diff --cached --quiet || git commit -m "Update proxy configs [$(date -u +%Y-%m-%d_%H:%M)]"
-          git push || true
-
-      - name: Create Release
-        if: github.ref == 'refs/heads/main' && github.event_name == 'schedule'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: proxy-${{ github.run_number }}
-          name: Proxy Update ${{ github.run_number }}
-          body: |
-            - Total found: ${{ steps.aggregate.outputs.count }}
-            - Unique configs: ${{ steps.aggregate.outputs.unique }}
-            - Generated at: ${{ github.event.repository.updated_at }}
-          files: |
-            clean_proxies.txt
-            subscription.txt
-            meta.json
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              for config in selected_configs:
+                  clean_config = config.strip()
+                  if clean_config:
+                      f.write(clean_config + "\n")
+EOF
