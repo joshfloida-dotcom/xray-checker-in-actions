@@ -17,7 +17,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-              # Шаг 1: Агрегация, декодирование и глубокая фильтрация ВСЕХ протоколов
       - name: Aggregate and Validate
         run: |
           python3 - << 'EOF'
@@ -40,216 +39,98 @@ jobs:
               "https://raw.githubusercontent.com/capitainblack/freetm3/refs/heads/main/configs/sub_10.txt"
           ]
 
-          UUID_RE = re.compile(
-              r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-          )
-          HOST_RE = re.compile(
-              r'^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$|'
-              r'^(\d{1,3}\.){3}\d{1,3}$'
-          )
+          UUID_RE = re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
+          HOST_RE = re.compile(r'^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$|'
+                               r'^(\d{1,3}\.){3}\d{1,3}$')
 
           def decode_subscription(content):
               content = content.strip()
               if "://" not in content:
                   try:
                       missing_padding = len(content) % 4
-                      if missing_padding:
-                          content += '=' * (4 - missing_padding)
+                      if missing_padding: content += '=' * (4 - missing_padding)
                       return base64.b64decode(content).decode('utf-8', errors='ignore')
-                  except Exception:
-                      return content
+                  except Exception: return content
               return content
 
           def has_garbage(link):
-              """Проверяем наличие битых UTF-8 маркеров и двойного URL-encoding."""
-              if not link or len(link) < 15:
-                  return True
-              if "\ufffd" in link:
-                  return True
-              if "%2525" in link or "%25%25" in link:
-                  return True
-              # Считаем количество непечатаемых control characters (кроме \n \r \t)
+              if not link or len(link) < 15: return True
+              if "\ufffd" in link: return True
+              if "%2525" in link or "%25%25" in link: return True
               control_chars = sum(1 for ch in link if ord(ch) < 32 and ch not in '\n\r\t')
-              if control_chars > 3:
-                  return True
-              return False
+              return control_chars > 3
 
           def is_valid_vmess(link):
               try:
                   payload = link.replace("vmess://", "").split('#')[0]
                   if not payload.startswith('{'):
+                      # Улучшение: поддержка URL-safe base64 (замена - и _ на + и /)
+                      payload = payload.replace('-', '+').replace('_', '/')
                       missing_padding = len(payload) % 4
-                      if missing_padding:
-                          payload += '=' * (4 - missing_padding)
+                      if missing_padding: payload += '=' * (4 - missing_padding)
                       payload = base64.b64decode(payload).decode('utf-8', errors='ignore')
                   data = json.loads(payload)
-                  # add и id обязательны
-                  if not data.get("add") or not data.get("id"):
-                      return False
-                  # id должен быть похож на UUID
+                  if not data.get("add") or not data.get("id"): return False
                   return bool(UUID_RE.match(str(data.get("id", ""))))
-              except Exception:
-                  return False
+              except Exception: return False
 
           def is_valid_vless(link):
               try:
                   body = link.replace("vless://", "").split('#')[0]
-                  if "@" not in body:
-                      return False
-                  
+                  if "@" not in body: return False
                   creds, server = body.split("@", 1)
-                  creds = creds.strip()
-                  server = server.strip()
-                  
-                  # UUID должен быть валидным
-                  if not UUID_RE.match(creds):
-                      return False
-                  
-                  # Должен быть host:port
-                  if ":" not in server:
-                      return False
+                  if not UUID_RE.match(creds.strip()): return False
                   host_port = server.split(":", 1)[0]
                   port_str = server.split(":", 1)[1].split("?")[0].split("/")[0]
-                  
-                  if not HOST_RE.match(host_port):
-                      return False
-                  if not port_str.isdigit() or not (1 <= int(port_str) <= 65535):
-                      return False
-                  
+                  if not HOST_RE.match(host_port) or not port_str.isdigit(): return False
                   return True
-              except Exception:
-                  return False
+              except Exception: return False
 
           def is_valid_trojan(link):
               try:
                   body = link.replace("trojan://", "").split('#')[0]
-                  if "@" not in body:
-                      return False
-                  
+                  if "@" not in body: return False
                   password, server = body.split("@", 1)
-                  password = password.strip()
-                  server = server.strip()
-                  
-                  # Пароль не должен быть пустым
-                  if not password or len(password) < 1:
-                      return False
-                  # Пароль не должен содержать битых UTF-8 последовательностей
-                  if "\ufffd" in password:
-                      return False
-                  
-                  # Должен быть host:port
-                  if ":" not in server:
-                      return False
+                  if not password or "\ufffd" in password: return False
                   host_port = server.split(":", 1)[0]
                   port_str = server.split(":", 1)[1].split("?")[0].split("/")[0]
-                  
-                  if not HOST_RE.match(host_port):
-                      return False
-                  if not port_str.isdigit() or not (1 <= int(port_str) <= 65535):
-                      return False
-                  
+                  if not HOST_RE.match(host_port) or not port_str.isdigit(): return False
                   return True
-              except Exception:
-                  return False
-
-          def is_valid_ss(link):
-              try:
-                  body = link.replace("ss://", "").split('#')[0]
-                  if "@" not in body:
-                      return False
-                  
-                  userinfo, server = body.split("@", 1)
-                  server = server.strip()
-                  
-                  # Пробуем декодировать base64 часть
-                  try:
-                      missing_padding = len(userinfo) % 4
-                      if missing_padding:
-                          userinfo += '=' * (4 - missing_padding)
-                      decoded = base64.b64decode(userinfo).decode('utf-8', errors='ignore')
-                      if ':' in decoded:
-                          userinfo = decoded
-                  except Exception:
-                      pass
-                  
-                  if ':' not in userinfo:
-                      return False
-                  
-                  method = userinfo.split(':', 1)[0]
-                  password = userinfo.split(':', 1)[1]
-                  
-                  # Метод шифрования должен быть валидным
-                  if not re.match(r'^[a-zA-Z0-9_\-]+$', method):
-                      return False
-                  # Пароль не пустой и без мусора
-                  if not password or "\ufffd" in password:
-                      return False
-                  
-                  # Проверка host:port
-                  if ":" not in server:
-                      return False
-                  host_port = server.split(":", 1)[0]
-                  port_str = server.split(":", 1)[1].split("?")[0].split("/")[0]
-                  
-                  if not HOST_RE.match(host_port):
-                      return False
-                  if not port_str.isdigit() or not (1 <= int(port_str) <= 65535):
-                      return False
-                  
-                  return True
-              except Exception:
-                  return False
+              except Exception: return False
 
           unique_configs = set()
-          total_found = 0
-
           print("[*] Скачивание и фильтрация конфигов...")
 
           for url in SOURCES:
               try:
                   req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
                   with urllib.request.urlopen(req, timeout=15) as response:
-                      raw_content = response.read().decode('utf-8', errors='ignore')
-                      content = decode_subscription(raw_content)
-                      
-                      matches = re.findall(
-                          r'(?:vmess|vless|ss|trojan)://[^\s\'"<>]+',
-                          content
-                      )
-                      total_found += len(matches)
-
+                      content = decode_subscription(response.read().decode('utf-8', errors='ignore'))
+                      matches = re.findall(r'(?:vmess|vless|trojan)://[^\s\'"<>]+', content)
                       for match in matches:
                           match = match.strip()
-                          if has_garbage(match):
-                              continue
-                          
-                          if match.startswith("vmess://"):
-                              if is_valid_vmess(match):
-                                  unique_configs.add(match)
-                          elif match.startswith("vless://"):
-                              if is_valid_vless(match):
-                                  unique_configs.add(match)
-                          elif match.startswith("ss://"):
-                              if is_valid_ss(match):
-                                  unique_configs.add(match)
-                          elif match.startswith("trojan://"):
-                              if is_valid_trojan(match):
-                                  unique_configs.add(match)
-              except Exception as e:
-                  print(f"[!] Ошибка загрузки {url}: {e}")
+                          if has_garbage(match): continue
+                          if match.startswith("vmess://") and is_valid_vmess(match): unique_configs.add(match)
+                          elif match.startswith("vless://") and is_valid_vless(match): unique_configs.add(match)
+                          elif match.startswith("trojan://") and is_valid_trojan(match): unique_configs.add(match)
+              except Exception as e: print(f"[!] Ошибка {url}: {e}")
 
-          unique_list = list(unique_configs)
-          random.shuffle(unique_list)
-          
-          CHECK_LIMIT = 2000
-          selected_configs = unique_list[:CHECK_LIMIT]
-          
-          print(f"[*] Всего ссылок найдено до фильтрации: {total_found}")
-          print(f"[+] Успешно очищено и отобрано: {len(selected_configs)}")
-
+          selected = list(unique_configs)[:2000]
           with open("clean_proxies.txt", "w", encoding="utf-8") as f:
-              for config in selected_configs:
-                  clean_config = config.strip()
-                  if clean_config:
-                      f.write(clean_config + "\n")
+              for config in selected: f.write(config + "\n")
+          print(f"[+] Отобрано {len(selected)} конфигов.")
           EOF
+
+      - name: Install and Run Xray Checker
+        run: |
+          curl -sL -o - $(curl -s https://api.github.com/repos/kutovoys/xray-checker/releases/latest | grep "browser_download_url.*linux-amd64.tar.gz" | cut -d'"' -f4) | tar -xz
+          chmod +x xray-checker
+          ./xray-checker --subscription-url="file://${{ github.workspace }}/clean_proxies.txt" --run-once | tee xray_check_log.txt
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Scanned-Proxies-and-Logs
+          path: |
+            clean_proxies.txt
+            xray_check_log.txt
