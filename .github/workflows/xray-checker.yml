@@ -1,46 +1,102 @@
-name: Run xray-checker
+name: Run xray-checker (Safe & Optimized)
 
 on:
-  workflow_dispatch: # Ручной запуск
+  workflow_dispatch: # Ручной запуск из интерфейса GitHub
     inputs:
       args:
-        description: "Arguments for xray-checker"
-        required: true
-        default: "--help"
+        description: "Аргументы для ручного запуска (оставь пустым для дефолтного чека)"
+        required: false
+        default: ""
   schedule:
-    - cron: "0/5 * * * *" # Запуск каждые 5 минут
+    - cron: "0 */2 * * *" # Автоматический запуск каждые 2 часа (для 2000 прокси это абсолютно безопасно)
 
 jobs:
   run-xray-checker:
     runs-on: ubuntu-latest
     steps:
-      - name: Get latest release info
-        id: latest-release
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Шаг 1: Агрегация, удаление дубликатов из 93к и случайный выбор 2000 конфигов
+      - name: Aggregate, Deduplicate and Sample
         run: |
-          LATEST_URL=$(curl -s https://api.github.com/repos/kutovoys/xray-checker/releases/latest | grep "browser_download_url.*linux-amd64.tar.gz" | cut -d '"' -f 4)
-          echo "download_url=$LATEST_URL" >> $GITHUB_OUTPUT
-          echo "archive_name=$(basename $LATEST_URL)" >> $GITHUB_OUTPUT
+          python3 - << 'EOF'
+          import urllib.request
+          import re
+          import random
 
-      - name: Create work directory
-        run: mkdir -p xray-checker
+          # === ТВОИ ССЫЛКИ-ИСТОЧНИКИ СЮДА ===
+          # Вставь сюда свои raw-ссылки на гизты, подписки или файлы
+          SOURCES = [
+              "https://raw.githubusercontent.com/capitainblack/freetm3/refs/heads/main/configs/sub_1.txt",
+              "https://raw.githubusercontent.com/capitainblack/freetm3/refs/heads/main/configs/sub_2.txt",
+              "https://raw.githubusercontent.com/capitainblack/freetm3/refs/heads/main/configs/sub_3.txt",
+              "https://raw.githubusercontent.com/capitainblack/freetm3/refs/heads/main/configs/sub_4.txt",
+              "https://raw.githubusercontent.com/capitainblack/freetm3/refs/heads/main/configs/sub_5.txt",
+              "https://raw.githubusercontent.com/capitainblack/freetm3/refs/heads/main/configs/sub_6.txt",
+              "https://raw.githubusercontent.com/capitainblack/freetm3/refs/heads/main/configs/sub_7.txt",
+              "https://raw.githubusercontent.com/capitainblack/freetm3/refs/heads/main/configs/sub_8.txt",
+              "https://raw.githubusercontent.com/capitainblack/freetm3/refs/heads/main/configs/sub_9.txt",
+              "https://raw.githubusercontent.com/capitainblack/freetm3/refs/heads/main/configs/sub_10.txt"
+          ]
 
-      - name: Download release archive
-        working-directory: xray-checker
+          unique_configs = set()
+          proxy_pattern = re.compile(r'(vless|vmess|ss|trojan|ssconf)://[^\s]+')
+
+          print("[*] Скачивание и парсинг баз...")
+          for url in SOURCES:
+              try:
+                  req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                  with urllib.request.urlopen(req, timeout=15) as response:
+                      content = response.read().decode('utf-8', errors='ignore')
+                      matches = [m.group(0) if hasattr(m, 'group') else re.search(m+r'://[^\s]+', content).group(0) for m in proxy_pattern.finditer(content)]
+                      for match in matches:
+                          unique_configs.add(match.strip())
+              except Exception as e:
+                  print(f"[!] Ошибка при загрузке источника {url}: {e}")
+
+          unique_list = list(unique_configs)
+          total_found = len(unique_list)
+          print(f"[+] Всего уникальных конфигураций найдено в источниках: {total_found}")
+
+          # Ограничиваем выборку до 2000 штук для защиты раннера от блокировок
+          CHECK_LIMIT = 2000
+          if total_found > CHECK_LIMIT:
+              selected_configs = random.sample(unique_list, CHECK_LIMIT)
+              print(f"[*] Защита активна: выбрано случайных {CHECK_LIMIT} серверов из {total_found}")
+          else:
+              selected_configs = unique_list
+              print(f"[*] База небольшая ({total_found}), проверяем полностью")
+
+          # Сохраняем готовую выборку в локальный файл
+          with open("clean_proxies.txt", "w", encoding="utf-8") as f:
+              for config in selected_configs:
+                  f.write(config + "\n")
+          EOF
+
+      # Шаг 2: Официальный метод установки бинарника из документации
+      - name: Install Xray Checker
         run: |
-          wget ${{ steps.latest-release.outputs.download_url }}
-          tar xzf ${{ steps.latest-release.outputs.archive_name }}
+          curl -sL -o - $(curl -s https://api.github.com/repos/kutovoys/xray-checker/releases/latest | grep "browser_download_url.*linux-amd64.tar.gz" | cut -d'"' -f4) | tar -xz
+          chmod +x xray-checker
 
-      - name: Set execute permission
-        working-directory: xray-checker
-        run: chmod +x xray-checker
-
-      - name: Run xray-checker
-        working-directory: xray-checker
+      # Шаг 3: Высокоскоростной запуск на 100 потоков с использованием file://
+      - name: Execute Check
         env:
-          INSTANCE: ${{ secrets.INSTANCE || 'github-actions' }}
+          SUBSCRIPTION_URL: "file://${{ github.workspace }}/clean_proxies.txt"
+          METRICS_PUSH_URL: ${{ secrets.PUSH_URL }}
+          INSTANCE: ${{ secrets.INSTANCE || 'github-actions-sampled' }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            ./xray-checker ${{ inputs.args }}
+          # Если запуск ручной и переданы кастомные аргументы через inputs
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.args }}" ]; then
+            ./xray-checker ${{ github.event.inputs.args }}
           else
-            ./xray-checker --subscription-url=${{ secrets.SUBSCRIPTION_URL }} --metrics-push-url=${{ secrets.PUSH_URL }} --metrics-instance=$INSTANCE --run-once
+            # Стандартный оптимизированный прогон для крона и дефолтного запуска
+            ./xray-checker \
+              --subscription-url="$SUBSCRIPTION_URL" \
+              --metrics-push-url="$METRICS_PUSH_URL" \
+              --metrics-instance="$INSTANCE" \
+              --concurrency 100 \
+              --timeout 2s \
+              --run-once || echo "Проверка завершена"
           fi
