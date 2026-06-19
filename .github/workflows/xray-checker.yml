@@ -17,7 +17,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Шаг 1: Агрегация, декодирование и фильтрация битых ссылок
+      # Шаг 1: Агрегация, декодирование и глубокая фильтрация ВСЕХ протоколов
       - name: Aggregate and Validate
         run: |
           python3 - << 'EOF'
@@ -66,16 +66,51 @@ jobs:
           def is_valid_vless(link):
               try:
                   payload = link.replace("vless://", "").split('@')[0]
-                  if len(payload) < 5:
+                  if len(payload) < 5 or "%" in payload:
                       return False
                   return True
+              except:
+                  return False
+
+          def is_valid_ss(link):
+              try:
+                  # Формат: ss://base64(method:password)@host:port#tag
+                  payload = link.replace("ss://", "").split('#')[0]
+                  if '@' not in payload:
+                      return False
+                  userinfo = payload.split('@')[0]
+                  
+                  # Пробуем декодировать base64 часть с методом шифрования
+                  try:
+                      missing_padding = len(userinfo) % 4
+                      if missing_padding: userinfo += '=' * (4 - missing_padding)
+                      decoded = base64.b64decode(userinfo).decode('utf-8', errors='ignore')
+                      if ':' in decoded:
+                          userinfo = decoded
+                  except:
+                      pass
+                  
+                  if ':' not in userinfo:
+                      return False
+                  
+                  method = userinfo.split(':')[0]
+                  # Метод шифрования должен состоять только из латиницы, цифр и дефисов/подчеркиваний
+                  return bool(re.match(r'^[a-zA-Z0-9_-]+$', method))
+              except:
+                  return False
+
+          def is_valid_trojan(link):
+              try:
+                  # Формат: trojan://password@host:port
+                  password = link.replace("trojan://", "").split('@')[0]
+                  # Пароль должен быть чистой строкой без битых байтов
+                  return bool(re.match(r'^[a-zA-Z0-9_-]+$', password))
               except:
                   return False
 
           def is_clean_link(link):
               if not link or len(link) < 15:
                   return False
-              # Вот правильная строка: ищем ТОЛЬКО битые символы (\ufffd) и зацикленный URL-encode (%2525)
               if "\ufffd" in link or "%2525" in link:
                   return False
               return True
@@ -106,8 +141,12 @@ jobs:
                           elif match.startswith("vless://"):
                               if is_valid_vless(match):
                                   unique_configs.add(match)
-                          else:
-                              unique_configs.add(match)
+                          elif match.startswith("ss://"):
+                              if is_valid_ss(match):
+                                  unique_configs.add(match)
+                          elif match.startswith("trojan://"):
+                              if is_valid_trojan(match):
+                                  unique_configs.add(match)
               except Exception as e:
                   print(f"[!] Ошибка загрузки {url}: {e}")
 
@@ -123,7 +162,6 @@ jobs:
           with open("clean_proxies.txt", "w", encoding="utf-8") as f:
               for config in selected_configs:
                   clean_config = config.strip()
-                  # Записываем только непустые строки
                   if clean_config:
                       f.write(clean_config + "\n")
           EOF
