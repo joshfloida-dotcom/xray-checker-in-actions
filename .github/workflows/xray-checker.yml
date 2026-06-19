@@ -17,11 +17,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Шаг 1: Агрегация, декодирование и глубокая фильтрация ВСЕХ протоколов
+      # Шаг 1: Агрегация, декодирование и глубочайшая валидация (Go-Strict)
       - name: Aggregate and Validate
         run: |
           python3 - << 'EOF'
           import urllib.request
+          import urllib.parse
           import re
           import random
           import base64
@@ -48,70 +49,64 @@ jobs:
                       if missing_padding: content += '=' * (4 - missing_padding)
                       return base64.b64decode(content).decode('utf-8', errors='ignore')
                   except:
-                      return content
+                      pass
               return content
 
           def is_valid_vmess(link):
               try:
-                  payload = link.replace("vmess://", "").split('#')[0]
-                  if not payload.startswith('{'):
-                      missing_padding = len(payload) % 4
-                      if missing_padding: payload += '=' * (4 - missing_padding)
-                      payload = base64.b64decode(payload).decode('utf-8', errors='ignore')
-                  data = json.loads(payload)
-                  return "add" in data or "id" in data 
-              except:
-                  return False
-
-          def is_valid_vless(link):
-              try:
-                  payload = link.replace("vless://", "").split('@')[0]
-                  if len(payload) < 5 or "%" in payload:
-                      return False
-                  return True
-              except:
-                  return False
-
-          def is_valid_ss(link):
-              try:
-                  # Формат: ss://base64(method:password)@host:port#tag
-                  payload = link.replace("ss://", "").split('#')[0]
-                  if '@' not in payload:
-                      return False
-                  userinfo = payload.split('@')[0]
+                  payload = link[8:].split('#')[0]
+                  # Нормализация Base64
+                  payload_std = payload.replace('-', '+').replace('_', '/')
+                  payload_std += "=" * ((4 - len(payload_std) % 4) % 4)
                   
-                  # Пробуем декодировать base64 часть с методом шифрования
+                  # Строгая проверка Base64 (как в Go)
                   try:
-                      missing_padding = len(userinfo) % 4
-                      if missing_padding: userinfo += '=' * (4 - missing_padding)
-                      decoded = base64.b64decode(userinfo).decode('utf-8', errors='ignore')
-                      if ':' in decoded:
-                          userinfo = decoded
+                      decoded_bytes = base64.b64decode(payload_std, validate=True)
                   except:
-                      pass
-                  
-                  if ':' not in userinfo:
                       return False
                   
-                  method = userinfo.split(':')[0]
-                  # Метод шифрования должен состоять только из латиницы, цифр и дефисов/подчеркиваний
-                  return bool(re.match(r'^[a-zA-Z0-9_-]+$', method))
+                  data = json.loads(decoded_bytes.decode('utf-8'))
+                  
+                  # Xray удалил поддержку tcp+http
+                  if data.get('net') == 'tcp' and data.get('type') == 'http':
+                      return False
+                      
+                  # Защита от ошибки "cannot unmarshal bool"
+                  if isinstance(data.get('tls'), bool):
+                      return False
+                      
+                  return "add" in data or "id" in data
               except:
                   return False
 
-          def is_valid_trojan(link):
+          def is_valid_vless_trojan(link):
               try:
-                  # Формат: trojan://password@host:port
-                  password = link.replace("trojan://", "").split('@')[0]
-                  # Пароль должен быть чистой строкой без битых байтов
-                  return bool(re.match(r'^[a-zA-Z0-9_-]+$', password))
+                  parsed = urllib.parse.urlparse(link)
+                  # Обязательно должен быть ID (для Vless) или Пароль (для Trojan)
+                  if not parsed.username:
+                      return False
+                      
+                  qs = urllib.parse.parse_qs(parsed.query)
+                  
+                  # Xray удалил поддержку tcp+http
+                  if qs.get('type', [''])[0] == 'tcp' and qs.get('headerType', [''])[0] == 'http':
+                      return False
+                      
+                  # Проверка структуры REALITY
+                  if qs.get('security', [''])[0] == 'reality':
+                      if not qs.get('pbk'):
+                          return False
+                          
+                  return True
               except:
                   return False
 
           def is_clean_link(link):
               if not link or len(link) < 15:
                   return False
-              if "\ufffd" in link or "%2525" in link:
+              payload = link.split('#')[0]
+              # Пропускаем только чистый ASCII, чтобы не крашить Go-парсер
+              if not all(ord(c) < 128 for c in payload):
                   return False
               return True
 
@@ -138,15 +133,11 @@ jobs:
                           if match.startswith("vmess://"):
                               if is_valid_vmess(match):
                                   unique_configs.add(match)
-                          elif match.startswith("vless://"):
-                              if is_valid_vless(match):
+                          elif match.startswith("vless://") or match.startswith("trojan://"):
+                              if is_valid_vless_trojan(match):
                                   unique_configs.add(match)
-                          elif match.startswith("ss://"):
-                              if is_valid_ss(match):
-                                  unique_configs.add(match)
-                          elif match.startswith("trojan://"):
-                              if is_valid_trojan(match):
-                                  unique_configs.add(match)
+                          # ss:// (Shadowsocks) пропускаем намеренно - они вызывают панику ядра
+                          
               except Exception as e:
                   print(f"[!] Ошибка загрузки {url}: {e}")
 
@@ -161,9 +152,8 @@ jobs:
 
           with open("clean_proxies.txt", "w", encoding="utf-8") as f:
               for config in selected_configs:
-                  clean_config = config.strip()
-                  if clean_config:
-                      f.write(clean_config + "\n")
+                  if config.strip():
+                      f.write(config.strip() + "\n")
           EOF
 
       # Шаг 2: Установка чекера
