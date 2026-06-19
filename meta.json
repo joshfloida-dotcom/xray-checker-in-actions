@@ -1,0 +1,14 @@
+{
+  "timestamp": "2026-06-19T17:15:50Z",
+  "total_found": 96813,
+  "unique": 47799,
+  "selected": 2000,
+  "online_checked": false,
+  "by_protocol": {
+    "vless": 1002,
+    "trojan": 581,
+    "vmess": 155,
+    "ss": 262
+  },
+  "sources": 10
+}
