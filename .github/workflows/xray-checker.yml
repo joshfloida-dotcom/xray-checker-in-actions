@@ -41,7 +41,6 @@ jobs:
           ]
 
           def decode_subscription(content):
-              """Пытается декодировать Base64, если в тексте нет явных протоколов."""
               content = content.strip()
               if "://" not in content:
                   try:
@@ -66,9 +65,7 @@ jobs:
 
           def is_valid_vless(link):
               try:
-                  # Извлекаем ID
                   payload = link.replace("vless://", "").split('@')[0]
-                  # Блокируем пустые ID и крашащий Xray спам из процентов (%2525)
                   if len(payload) < 5 or "%" in payload:
                       return False
                   return True
@@ -76,10 +73,10 @@ jobs:
                   return False
 
           def is_clean_link(link):
-              # Отсекаем явный мусор, битые символы и пустые строки
               if not link or len(link) < 15:
                   return False
-              if "" in link or "%2525" in link:
+              # Ищем битые символы кодировки () и зацикленный URL-encode (%2525)
+              if "\ufffd" in link or "" in link or "%2525" in link:
                   return False
               return True
 
@@ -95,7 +92,6 @@ jobs:
                       raw_content = response.read().decode('utf-8', errors='ignore')
                       content = decode_subscription(raw_content)
                       
-                      # Ищем ссылки без пробелов и кавычек
                       matches = re.findall(r'(?:vmess|vless|ss|trojan)://[^\s"' + "'" + r'<>]+', content)
                       total_found += len(matches)
 
