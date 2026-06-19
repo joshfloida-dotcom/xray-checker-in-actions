@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       args:
-        description: "Аргументы для ручного запуска (оставь пустым для дефолтного чека)"
+        description: "Аргументы для ручного запуска"
         required: false
         default: ""
   schedule:
-    - cron: "0 */2 * * *"
+    - cron: "0 */2 * * *" # Запуск каждые 2 часа
 
 jobs:
   run-xray-checker:
@@ -17,14 +17,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Шаг 1: Умный сбор (Base64), очистка от мусора и случайная выборка 2000 конфигов
-      - name: Advanced Aggregate, Clean and Sample
+      # Шаг 1: Агрегация и жесткая фильтрация битых ссылок
+      - name: Aggregate and Validate
         run: |
           python3 - << 'EOF'
           import urllib.request
           import re
           import random
           import base64
+          import json
 
           SOURCES = [
               "https://raw.githubusercontent.com/capitainblack/freetm3/refs/heads/main/configs/sub_1.txt",
@@ -39,76 +40,62 @@ jobs:
               "https://raw.githubusercontent.com/capitainblack/freetm3/refs/heads/main/configs/sub_10.txt"
           ]
 
-          SUPPORTED_PROTOCOLS = ("vmess://", "vless://", "trojan://", "ss://", "ssr://", "hy2://", "hysteria2://", "tuic://")
-          proxy_pattern = re.compile(r'(?:vless|vmess|ss|ssr|trojan|hy2|hysteria2|tuic)://[^\s]+')
-          uuid_pattern = re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
+          def is_valid_vmess(link):
+              try:
+                  # Извлекаем payload
+                  payload = link.replace("vmess://", "").split('#')[0]
+                  # Если это base64 (старый формат), декодируем
+                  if not payload.startswith('{'):
+                      missing_padding = len(payload) % 4
+                      if missing_padding: payload += '=' * (4 - missing_padding)
+                      payload = base64.b64decode(payload).decode('utf-8', errors='ignore')
+                  
+                  # Проверяем JSON на валидность
+                  data = json.loads(payload)
+                  return "add" in data or "id" in data 
+              except:
+                  return False
 
           unique_configs = set()
+          print("[*] Скачивание и валидация конфигов...")
 
-          def decode_and_extract(raw_text):
-              content = raw_text.strip()
-              if not content:
-                  return []
-              if any(p in content for p in SUPPORTED_PROTOCOLS):
-                  return [m.strip() for m in proxy_pattern.findall(content)]
-              try:
-                  padding = len(content) % 4
-                  if padding:
-                      content += "=" * (4 - padding)
-                  decoded = base64.b64decode(content).decode("utf-8", errors="ignore")
-                  return [m.strip() for m in proxy_pattern.findall(decoded)]
-              except:
-                  return []
-
-          def is_valid_config(config):
-              if len(config) > 800 or len(config) < 15:
-                  return False
-              if config.startswith('vless://'):
-                  try:
-                      uuid_part = config.split('://')[1].split('@')[0]
-                      if not uuid_pattern.match(uuid_part):
-                          return False
-                  except:
-                      return False
-              return True
-
-          print("[*] Запуск глубокого парсинга подписок...")
           for url in SOURCES:
               try:
                   req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
                   with urllib.request.urlopen(req, timeout=15) as response:
-                      raw_data = response.read().decode('utf-8', errors='ignore')
-                      extracted = decode_and_extract(raw_data)
-                      for config in extracted:
-                          if is_valid_config(config):
-                              unique_configs.add(config)
+                      content = response.read().decode('utf-8', errors='ignore')
+                      # Регулярка для сбора всех популярных протоколов
+                      matches = re.findall(r'(?:vmess|vless|ss|trojan)://[^\s]+', content)
+                      for match in matches:
+                          if match.startswith("vmess://"):
+                              if is_valid_vmess(match):
+                                  unique_configs.add(match)
+                          else:
+                              # Остальные протоколы добавляем без глубокой проверки
+                              unique_configs.add(match)
               except Exception as e:
-                  print(f"[!] Не удалось обработать источник {url}: {e}")
+                  print(f"[!] Ошибка загрузки {url}: {e}")
 
           unique_list = list(unique_configs)
-          total_found = len(unique_list)
-          print(f"[+] Успешно отфильтровано и очищено уникальных конфигов: {total_found}")
-
+          random.shuffle(unique_list)
+          
+          # Ограничение для стабильности работы
           CHECK_LIMIT = 2000
-          if total_found > CHECK_LIMIT:
-              selected_configs = random.sample(unique_list, CHECK_LIMIT)
-              print(f"[*] Защита активна: выбрано случайных {CHECK_LIMIT} серверов из {total_found}")
-          else:
-              selected_configs = unique_list
-              print(f"[*] База небольшая ({total_found}), проверяем полностью")
-
+          selected_configs = unique_list[:CHECK_LIMIT]
+          
           with open("clean_proxies.txt", "w", encoding="utf-8") as f:
               for config in selected_configs:
                   f.write(config + "\n")
+          print(f"[+] Успешно отобрано {len(selected_configs)} валидных конфигураций.")
           EOF
 
-      # Шаг 2: Официальный метод установки бинарника из документации
+      # Шаг 2: Установка чекера
       - name: Install Xray Checker
         run: |
           curl -sL -o - $(curl -s https://api.github.com/repos/kutovoys/xray-checker/releases/latest | grep "browser_download_url.*linux-amd64.tar.gz" | cut -d'"' -f4) | tar -xz
           chmod +x xray-checker
 
-      # Шаг 3: Высокоскоростной запуск с использованием file://
+      # Шаг 3: Запуск проверки
       - name: Execute Check
         env:
           SUBSCRIPTION_URL: "file://${{ github.workspace }}/clean_proxies.txt"
