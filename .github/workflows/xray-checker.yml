@@ -40,38 +40,56 @@ jobs:
               "https://raw.githubusercontent.com/capitainblack/freetm3/refs/heads/main/configs/sub_10.txt"
           ]
 
+          # Регулярное выражение для проверки структуры стандартного UUID
+          UUID_REGEX = re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
+
           def is_valid_vmess(link):
               try:
-                  # Извлекаем payload
                   payload = link.replace("vmess://", "").split('#')[0]
-                  # Если это base64 (старый формат), декодируем
                   if not payload.startswith('{'):
                       missing_padding = len(payload) % 4
                       if missing_padding: payload += '=' * (4 - missing_padding)
                       payload = base64.b64decode(payload).decode('utf-8', errors='ignore')
-                  
-                  # Проверяем JSON на валидность
                   data = json.loads(payload)
                   return "add" in data or "id" in data 
               except:
                   return False
 
+          def is_valid_vless(link):
+              try:
+                  # Извлекаем UUID (всё, что между vless:// и знаком @)
+                  payload = link.replace("vless://", "").split('@')[0]
+                  return bool(UUID_REGEX.match(payload))
+              except:
+                  return False
+
+          def is_clean_link(link):
+              # Отсекаем ссылки с битыми байтами () и зацикленным URL-кодированием (%2525)
+              if "" in link or "%2525" in link:
+                  return False
+              return True
+
           unique_configs = set()
-          print("[*] Скачивание и валидация конфигов...")
+          print("[*] Скачивание и жесткая фильтрация конфигов...")
 
           for url in SOURCES:
               try:
                   req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
                   with urllib.request.urlopen(req, timeout=15) as response:
                       content = response.read().decode('utf-8', errors='ignore')
-                      # Регулярка для сбора всех популярных протоколов
                       matches = re.findall(r'(?:vmess|vless|ss|trojan)://[^\s]+', content)
                       for match in matches:
+                          if not is_clean_link(match):
+                              continue
+                          
                           if match.startswith("vmess://"):
                               if is_valid_vmess(match):
                                   unique_configs.add(match)
+                          elif match.startswith("vless://"):
+                              if is_valid_vless(match):
+                                  unique_configs.add(match)
                           else:
-                              # Остальные протоколы добавляем без глубокой проверки
+                              # ss:// и trojan:// добавляем, если они прошли базовую очистку символов
                               unique_configs.add(match)
               except Exception as e:
                   print(f"[!] Ошибка загрузки {url}: {e}")
@@ -79,14 +97,13 @@ jobs:
           unique_list = list(unique_configs)
           random.shuffle(unique_list)
           
-          # Ограничение для стабильности работы
           CHECK_LIMIT = 2000
           selected_configs = unique_list[:CHECK_LIMIT]
           
           with open("clean_proxies.txt", "w", encoding="utf-8") as f:
               for config in selected_configs:
                   f.write(config + "\n")
-          print(f"[+] Успешно отобрано {len(selected_configs)} валидных конфигураций.")
+          print(f"[+] Успешно очищено и отобрано {len(selected_configs)} конфигураций.")
           EOF
 
       # Шаг 2: Установка чекера
@@ -95,7 +112,7 @@ jobs:
           curl -sL -o - $(curl -s https://api.github.com/repos/kutovoys/xray-checker/releases/latest | grep "browser_download_url.*linux-amd64.tar.gz" | cut -d'"' -f4) | tar -xz
           chmod +x xray-checker
 
-      # Шаг 3: Запуск проверки
+      # Шаг 3: Запуск проверки и вывод логов в файл (используем tee)
       - name: Execute Check
         env:
           SUBSCRIPTION_URL: "file://${{ github.workspace }}/clean_proxies.txt"
@@ -103,11 +120,21 @@ jobs:
           INSTANCE: ${{ secrets.INSTANCE || 'github-actions-sampled' }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.args }}" ]; then
-            ./xray-checker ${{ github.event.inputs.args }}
+            ./xray-checker ${{ github.event.inputs.args }} | tee xray_check_log.txt
           else
             ./xray-checker \
               --subscription-url="$SUBSCRIPTION_URL" \
               --metrics-push-url="$METRICS_PUSH_URL" \
               --metrics-instance="$INSTANCE" \
-              --run-once || echo "Проверка завершена"
+              --run-once | tee xray_check_log.txt || echo "Проверка завершена"
           fi
+
+      # Шаг 4: Сохраняем текстовые файлы как артефакты, чтобы их можно было скачать
+      - name: Upload Scanned Configs Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Scanned-Proxies-and-Logs
+          path: |
+            clean_proxies.txt
+            xray_check_log.txt
+          retention-days: 5
