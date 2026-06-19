@@ -1,28 +1,8 @@
-name: Run xray-checker (Safe & Optimized)
-
-on:
-  workflow_dispatch:
-    inputs:
-      args:
-        description: "Аргументы для ручного запуска"
-        required: false
-        default: ""
-  schedule:
-    - cron: "0 */2 * * *" # Запуск каждые 2 часа
-
-jobs:
-  run-xray-checker:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # Шаг 1: Агрегация, декодирование и глубочайшая валидация (Go-Strict)
+      # Шаг 1: Агрегация, декодирование и глубокая фильтрация ВСЕХ протоколов
       - name: Aggregate and Validate
         run: |
           python3 - << 'EOF'
           import urllib.request
-          import urllib.parse
           import re
           import random
           import base64
@@ -41,74 +21,165 @@ jobs:
               "https://raw.githubusercontent.com/capitainblack/freetm3/refs/heads/main/configs/sub_10.txt"
           ]
 
+          UUID_RE = re.compile(
+              r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+          )
+          HOST_RE = re.compile(
+              r'^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$|'
+              r'^(\d{1,3}\.){3}\d{1,3}$'
+          )
+
           def decode_subscription(content):
               content = content.strip()
               if "://" not in content:
                   try:
                       missing_padding = len(content) % 4
-                      if missing_padding: content += '=' * (4 - missing_padding)
+                      if missing_padding:
+                          content += '=' * (4 - missing_padding)
                       return base64.b64decode(content).decode('utf-8', errors='ignore')
-                  except:
-                      pass
+                  except Exception:
+                      return content
               return content
+
+          def has_garbage(link):
+              """Проверяем наличие битых UTF-8 маркеров и двойного URL-encoding."""
+              if not link or len(link) < 15:
+                  return True
+              if "\ufffd" in link:
+                  return True
+              if "%2525" in link or "%25%25" in link:
+                  return True
+              # Считаем количество непечатаемых control characters (кроме \n \r \t)
+              control_chars = sum(1 for ch in link if ord(ch) < 32 and ch not in '\n\r\t')
+              if control_chars > 3:
+                  return True
+              return False
 
           def is_valid_vmess(link):
               try:
-                  payload = link[8:].split('#')[0]
-                  # Нормализация Base64
-                  payload_std = payload.replace('-', '+').replace('_', '/')
-                  payload_std += "=" * ((4 - len(payload_std) % 4) % 4)
-                  
-                  # Строгая проверка Base64 (как в Go)
-                  try:
-                      decoded_bytes = base64.b64decode(payload_std, validate=True)
-                  except:
+                  payload = link.replace("vmess://", "").split('#')[0]
+                  if not payload.startswith('{'):
+                      missing_padding = len(payload) % 4
+                      if missing_padding:
+                          payload += '=' * (4 - missing_padding)
+                      payload = base64.b64decode(payload).decode('utf-8', errors='ignore')
+                  data = json.loads(payload)
+                  # add и id обязательны
+                  if not data.get("add") or not data.get("id"):
                       return False
-                  
-                  data = json.loads(decoded_bytes.decode('utf-8'))
-                  
-                  # Xray удалил поддержку tcp+http
-                  if data.get('net') == 'tcp' and data.get('type') == 'http':
-                      return False
-                      
-                  # Защита от ошибки "cannot unmarshal bool"
-                  if isinstance(data.get('tls'), bool):
-                      return False
-                      
-                  return "add" in data or "id" in data
-              except:
+                  # id должен быть похож на UUID
+                  return bool(UUID_RE.match(str(data.get("id", ""))))
+              except Exception:
                   return False
 
-          def is_valid_vless_trojan(link):
+          def is_valid_vless(link):
               try:
-                  parsed = urllib.parse.urlparse(link)
-                  # Обязательно должен быть ID (для Vless) или Пароль (для Trojan)
-                  if not parsed.username:
+                  body = link.replace("vless://", "").split('#')[0]
+                  if "@" not in body:
                       return False
-                      
-                  qs = urllib.parse.parse_qs(parsed.query)
                   
-                  # Xray удалил поддержку tcp+http
-                  if qs.get('type', [''])[0] == 'tcp' and qs.get('headerType', [''])[0] == 'http':
+                  creds, server = body.split("@", 1)
+                  creds = creds.strip()
+                  server = server.strip()
+                  
+                  # UUID должен быть валидным
+                  if not UUID_RE.match(creds):
                       return False
-                      
-                  # Проверка структуры REALITY
-                  if qs.get('security', [''])[0] == 'reality':
-                      if not qs.get('pbk'):
-                          return False
-                          
+                  
+                  # Должен быть host:port
+                  if ":" not in server:
+                      return False
+                  host_port = server.split(":", 1)[0]
+                  port_str = server.split(":", 1)[1].split("?")[0].split("/")[0]
+                  
+                  if not HOST_RE.match(host_port):
+                      return False
+                  if not port_str.isdigit() or not (1 <= int(port_str) <= 65535):
+                      return False
+                  
                   return True
-              except:
+              except Exception:
                   return False
 
-          def is_clean_link(link):
-              if not link or len(link) < 15:
+          def is_valid_trojan(link):
+              try:
+                  body = link.replace("trojan://", "").split('#')[0]
+                  if "@" not in body:
+                      return False
+                  
+                  password, server = body.split("@", 1)
+                  password = password.strip()
+                  server = server.strip()
+                  
+                  # Пароль не должен быть пустым
+                  if not password or len(password) < 1:
+                      return False
+                  # Пароль не должен содержать битых UTF-8 последовательностей
+                  if "\ufffd" in password:
+                      return False
+                  
+                  # Должен быть host:port
+                  if ":" not in server:
+                      return False
+                  host_port = server.split(":", 1)[0]
+                  port_str = server.split(":", 1)[1].split("?")[0].split("/")[0]
+                  
+                  if not HOST_RE.match(host_port):
+                      return False
+                  if not port_str.isdigit() or not (1 <= int(port_str) <= 65535):
+                      return False
+                  
+                  return True
+              except Exception:
                   return False
-              payload = link.split('#')[0]
-              # Пропускаем только чистый ASCII, чтобы не крашить Go-парсер
-              if not all(ord(c) < 128 for c in payload):
+
+          def is_valid_ss(link):
+              try:
+                  body = link.replace("ss://", "").split('#')[0]
+                  if "@" not in body:
+                      return False
+                  
+                  userinfo, server = body.split("@", 1)
+                  server = server.strip()
+                  
+                  # Пробуем декодировать base64 часть
+                  try:
+                      missing_padding = len(userinfo) % 4
+                      if missing_padding:
+                          userinfo += '=' * (4 - missing_padding)
+                      decoded = base64.b64decode(userinfo).decode('utf-8', errors='ignore')
+                      if ':' in decoded:
+                          userinfo = decoded
+                  except Exception:
+                      pass
+                  
+                  if ':' not in userinfo:
+                      return False
+                  
+                  method = userinfo.split(':', 1)[0]
+                  password = userinfo.split(':', 1)[1]
+                  
+                  # Метод шифрования должен быть валидным
+                  if not re.match(r'^[a-zA-Z0-9_\-]+$', method):
+                      return False
+                  # Пароль не пустой и без мусора
+                  if not password or "\ufffd" in password:
+                      return False
+                  
+                  # Проверка host:port
+                  if ":" not in server:
+                      return False
+                  host_port = server.split(":", 1)[0]
+                  port_str = server.split(":", 1)[1].split("?")[0].split("/")[0]
+                  
+                  if not HOST_RE.match(host_port):
+                      return False
+                  if not port_str.isdigit() or not (1 <= int(port_str) <= 65535):
+                      return False
+                  
+                  return True
+              except Exception:
                   return False
-              return True
 
           unique_configs = set()
           total_found = 0
@@ -122,22 +193,29 @@ jobs:
                       raw_content = response.read().decode('utf-8', errors='ignore')
                       content = decode_subscription(raw_content)
                       
-                      matches = re.findall(r'(?:vmess|vless|ss|trojan)://[^\s"' + "'" + r'<>]+', content)
+                      matches = re.findall(
+                          r'(?:vmess|vless|ss|trojan)://[^\s\'"<>]+',
+                          content
+                      )
                       total_found += len(matches)
 
                       for match in matches:
                           match = match.strip()
-                          if not is_clean_link(match):
+                          if has_garbage(match):
                               continue
                           
                           if match.startswith("vmess://"):
                               if is_valid_vmess(match):
                                   unique_configs.add(match)
-                          elif match.startswith("vless://") or match.startswith("trojan://"):
-                              if is_valid_vless_trojan(match):
+                          elif match.startswith("vless://"):
+                              if is_valid_vless(match):
                                   unique_configs.add(match)
-                          # ss:// (Shadowsocks) пропускаем намеренно - они вызывают панику ядра
-                          
+                          elif match.startswith("ss://"):
+                              if is_valid_ss(match):
+                                  unique_configs.add(match)
+                          elif match.startswith("trojan://"):
+                              if is_valid_trojan(match):
+                                  unique_configs.add(match)
               except Exception as e:
                   print(f"[!] Ошибка загрузки {url}: {e}")
 
@@ -152,39 +230,7 @@ jobs:
 
           with open("clean_proxies.txt", "w", encoding="utf-8") as f:
               for config in selected_configs:
-                  if config.strip():
-                      f.write(config.strip() + "\n")
+                  clean_config = config.strip()
+                  if clean_config:
+                      f.write(clean_config + "\n")
           EOF
-
-      # Шаг 2: Установка чекера
-      - name: Install Xray Checker
-        run: |
-          curl -sL -o - $(curl -s https://api.github.com/repos/kutovoys/xray-checker/releases/latest | grep "browser_download_url.*linux-amd64.tar.gz" | cut -d'"' -f4) | tar -xz
-          chmod +x xray-checker
-
-      # Шаг 3: Запуск проверки и вывод логов в файл
-      - name: Execute Check
-        env:
-          SUBSCRIPTION_URL: "file://${{ github.workspace }}/clean_proxies.txt"
-          METRICS_PUSH_URL: ${{ secrets.PUSH_URL }}
-          INSTANCE: ${{ secrets.INSTANCE || 'github-actions-sampled' }}
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.args }}" ]; then
-            ./xray-checker ${{ github.event.inputs.args }} | tee xray_check_log.txt
-          else
-            ./xray-checker \
-              --subscription-url="$SUBSCRIPTION_URL" \
-              --metrics-push-url="$METRICS_PUSH_URL" \
-              --metrics-instance="$INSTANCE" \
-              --run-once | tee xray_check_log.txt || echo "Проверка завершена"
-          fi
-
-      # Шаг 4: Сохранение артефактов
-      - name: Upload Scanned Configs Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Scanned-Proxies-and-Logs
-          path: |
-            clean_proxies.txt
-            xray_check_log.txt
-          retention-days: 5
